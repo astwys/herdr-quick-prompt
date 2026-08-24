@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Send a named prompt directly, skipping prompt selection:
+#   bin/run-prompt <prompt-file-name>
+#
+# One agent in the tab -> sent immediately. Several -> the popup opens straight
+# at the agent list. Meant to be bound in the user's own config.toml:
+#
+#   [[keys.command]]
+#   key = "prefix+alt+1"
+#   type = "shell"
+#   command = "bash <plugin root>/bin/run-prompt hunk-review"
+
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+fail() {
+  notify "$1"
+  exit 0
+}
+
+command -v jq >/dev/null 2>&1 || fail "jq is required"
+
+name="${1:-}"
+[[ -n "$name" ]] || fail "usage: run-prompt <prompt-name>"
+
+plugin_id="${HERDR_PLUGIN_ID:-herdr-quick-prompt}"
+prompts_dir="${HERDR_PLUGIN_CONFIG_DIR:-$(herdr plugin config-dir "$plugin_id" 2>/dev/null)}/prompts"
+file="$prompts_dir/$name"
+[[ -f "$file" ]] || fail "no prompt named '$name' in $prompts_dir"
+
+text=$(cat "$file")
+[[ -n "$text" ]] || fail "'$name' is empty."
+
+tab=$(jq -r '.tab_id // empty' <<<"$context" 2>/dev/null || true)
+[[ -n "$tab" ]] || tab="${HERDR_TAB_ID:-}"
+[[ -n "$tab" ]] || fail "no tab context; invoke this from inside Herdr"
+
+workspace=$(jq -r '.workspace_id // empty' <<<"$context" 2>/dev/null || true)
+[[ -n "$workspace" ]] || workspace="${HERDR_WORKSPACE_ID:-}"
+
+agents=$(agents_in_tab "$tab")
+if [[ -z "$agents" ]]; then
+  fail "no agents running in this tab"
+fi
+
+if [[ $(printf '%s\n' "$agents" | grep -c .) -eq 1 ]]; then
+  IFS=$'\t' read -r pane status label title cwd <<<"$agents"
+  send_to_agent "$pane" "$label ($cwd)" "$text" || true
+  exit 0
+fi
+
+open_agent_picker "$tab" "$workspace" "$text"

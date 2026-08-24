@@ -1,0 +1,13 @@
+# Only used by demo/setup.sh and demo/demo.tape.
+[ui]
+sidebar_start_collapsed = true
+sidebar_collapsed_mode = "hidden"
+
+[keys]
+prefix = "ctrl+a"
+
+[[keys.command]]
+key = "prefix+q"
+type = "plugin_action"
+command = "herdr-quick-prompt.send-prompt"
+description = "send prompt to agent"

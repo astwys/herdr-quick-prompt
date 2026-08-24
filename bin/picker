@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# Popup pane entrypoint (runs with a TTY).
+#
+#   picker            interactive flow: pick a prompt, then an agent
+#   picker __list     fzf reload helper: scope radio line + agent rows
+#   picker __cycle    fzf bind helper: cycle the scope state file
+#
+# POST_TAB / POST_WORKSPACE are set by the action that opens this pane. Prompts are plain files
+# in <config dir>/prompts; filename is the label, content is the text.
+
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+fail() {
+  printf '\n%s\n\nPress any key to close.\n' "$1"
+  read -r -n 1 || true
+  exit 0
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "Required command not found: $1"
+}
+
+# ---- helpers for fzf binds -------------------------------------------------
+
+# Phase-1 Enter: with a matched item, select it; otherwise stash the typed
+# text for the caller (fzf exports FZF_QUERY / FZF_CURRENT_ITEM here).
+__enter() {
+  if [[ -z "${FZF_CURRENT_ITEM:-}" ]]; then
+    printf '%s' "${FZF_QUERY:-}" > "${QUERY_FILE:?}"
+  fi
+  echo accept
+}
+
+SCOPE_FILE="${SCOPE_FILE:-}"
+tab="${POST_TAB:-}"
+text="${POST_TEXT:-}"
+
+__cycle_scope() {
+  local next
+  case "$(cat "$SCOPE_FILE" 2>/dev/null || echo tab)" in
+    tab)       next=workspace ;;
+    workspace) next=all ;;
+    *)         next=tab ;;
+  esac
+  printf '%s' "$next" > "$SCOPE_FILE"
+}
+
+# Scope name for the border label.
+__label() {
+  local scope
+  scope=$(cat "$SCOPE_FILE" 2>/dev/null || echo tab)
+  case "$scope" in
+    tab)       printf 'current tab' ;;
+    workspace) printf 'current space' ;;
+    *)         printf 'all' ;;
+  esac
+}
+
+# Composed context card for the preview. Args come from the highlighted row:
+# pane_id, agent, title, status, cwd (hidden fields included).
+__context() {
+  local pane="$1" agent="$2" title="$3" status="$4" cwd="$5"
+  local branch
+  branch=$(git -C "${cwd:-/}" branch --show-current 2>/dev/null || true)
+
+  [[ -n "$title" ]] && printf '%-10s %s\n' 'task' "$title"
+  printf '%-10s %s\n' 'agent' "$agent"
+  [[ -n "$status" ]] && printf '%-10s %s\n' 'status' "$status"
+  [[ -n "$branch" ]] && printf '%-10s %s\n' 'branch' "$branch"
+  [[ -n "$cwd" ]] && printf '%-10s %s\n' 'worktree' "$cwd"
+  printf '%s\n' '── recent output ──'
+  "$HERDR" agent read "$pane" --lines 24 2>/dev/null || true
+}
+
+case "${1:-}" in
+  __enter)
+    __enter
+    exit 0
+    ;;
+  __context)
+    shift
+    __context "$@"
+    exit 0
+    ;;
+  __cycle)
+    [[ -n "$SCOPE_FILE" ]] && __cycle_scope
+    exit 0
+    ;;
+  __label)
+    __label
+    exit 0
+    ;;
+  __list)
+    export HERDR
+    # Row shape: pane_id \t agent \t title \t status(ANSI-colored). Blocked
+    # gets red (Herdr rejects prompts to it), working yellow, idle green.
+    agents_for_scope "$(cat "$SCOPE_FILE" 2>/dev/null || echo tab)" \
+      "$tab" "${POST_WORKSPACE:-}" |
+      awk -F'\t' -v OFS='\t' '
+        {
+          color = ($2 == "blocked") ? "31" : ($2 == "working") ? "33" : "32"
+          print $1, $3, $4 " [" $1 "]", "\033[" color "m" $2 "\033[0m", $5
+        }'
+    exit 0
+    ;;
+esac
+
+# ---- interactive flow ------------------------------------------------------
+
+require_command jq
+require_command fzf
+
+[[ -n "$tab" ]] || fail "No tab context."
+
+plugin_id="${HERDR_PLUGIN_ID:-herdr-quick-prompt}"
+prompts_dir="${HERDR_PLUGIN_CONFIG_DIR:-}/prompts"
+
+if [[ -z "$text" ]]; then
+  [[ -d "$prompts_dir" ]] || fail "No prompts directory yet. Create one: mkdir -p $(herdr plugin config-dir "$plugin_id" 2>/dev/null || echo '<plugin config dir>')/prompts"
+
+  prompt_files=$(find "$prompts_dir" -maxdepth 1 -type f ! -name '.*' | sort)
+  [[ -n "$prompt_files" ]] || fail "No prompts yet. Add a file to $prompts_dir — its name is the label, its content the text."
+
+  # Phase 1: pick a prompt. Enter on a match selects it; Enter with nothing
+  # matching sends the typed text instead (stashed by __enter).
+  prompt_names=$(printf '%s\n' "$prompt_files" | while IFS= read -r f; do basename "$f"; done)
+
+  QUERY_FILE=$(mktemp)
+  export QUERY_FILE
+  rc=0
+  choice=$(printf '%s\n' "$prompt_names" |
+    fzf --layout=reverse --height=100% --info=hidden \
+        --no-separator --no-scrollbar --cycle \
+        --prompt '› ' --pointer '▸' \
+        --header='enter select · or type new text and enter · esc cancel' \
+        --bind "enter:transform(bash $0 __enter)") || rc=$?
+  # rc 1 = accepted with no selection (the free-text path); not an error.
+
+  if [[ -s "$QUERY_FILE" ]]; then
+    text=$(cat "$QUERY_FILE")
+  elif [[ $rc -eq 0 && -f "$prompts_dir/$choice" ]]; then
+    text=$(cat "$prompts_dir/$choice")
+  else
+    exit 0
+  fi
+  [[ -n "$text" ]] || fail "Empty prompt."
+fi
+
+# Phase 2: pick the target agent. One agent in the tab sends directly.
+agents=$(agents_in_tab "$tab")
+[[ -n "$agents" ]] || fail "No agents running in this tab."
+
+if [[ $(printf '%s\n' "$agents" | grep -c .) -eq 1 ]]; then
+  IFS=$'\t' read -r pane status label title cwd <<<"$agents"
+  if result=$(send_to_agent "$pane" "$label ($cwd)" "$text" 2>&1); then
+    printf '%s\n' "$result"
+    exit 0
+  fi
+  fail "$result"
+fi
+
+export HERDR
+SCOPE_FILE=$(mktemp)
+export SCOPE_FILE
+printf 'tab' > "$SCOPE_FILE"
+
+choice=$(bash "$0" __list |
+  fzf --ansi --delimiter=$'\t' --with-nth=2,3,4 \
+      --layout=reverse --height=100% --info=hidden \
+      --no-scrollbar --cycle \
+      --prompt '› ' --marker '' --pointer '' \
+      --color current-bg:237,current-fg:white \
+      --border rounded --border-label "$(bash "$0" __label)" --border-label-pos 2 \
+      --footer "$(printf '\033[2menter send · ctrl-t scope · ctrl-p out · esc cancel\033[0m')" \
+      --preview "bash $0 __context {1} {2} {3} {4} {5}" \
+      --preview-window 'bottom:50%:noborder:wrap:hidden' \
+      --preview-label 'context' --preview-label-pos 2 \
+      --bind "ctrl-t:execute-silent(bash $0 __cycle)+reload(bash $0 __list)+transform-border-label(bash $0 __label)" \
+      --bind 'ctrl-p:toggle-preview') || exit 0
+
+pane=$(cut -f1 <<<"$choice")
+label=$(cut -f2 <<<"$choice")
+[[ -n "$pane" ]] || fail "Could not read the selection."
+
+# Blocked agents cannot accept prompts; Herdr rejects the submission. The
+# marker is shown in the list so the choice is visible before sending.
+if ! result=$(send_to_agent "$pane" "$label" "$text" 2>&1); then
+  fail "$result"
+fi
+
+printf '%s\n' "$result"

@@ -1,0 +1,20 @@
+id = "herdr-quick-prompt"
+name = "Quick Prompt"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Send predefined prompts to an agent pane in the current tab"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "send-prompt"
+title = "Send a prompt to an agent…"
+contexts = ["workspace"]
+command = ["bash", "bin/send-prompt"]
+
+[[panes]]
+id = "picker"
+title = "Send prompt to agent"
+placement = "popup"
+width = "40%"
+height = 24
+command = ["bash", "bin/picker"]

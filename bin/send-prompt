@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Action entrypoint. Actions run without a TTY, so this only opens the picker
+# popup pane (which gets one); all interaction happens in bin/picker.
+
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+fail() {
+  notify "$1"
+  exit 0
+}
+
+command -v jq >/dev/null 2>&1 || fail "jq is required"
+
+tab=$(jq -r '.tab_id // empty' <<<"$context" 2>/dev/null || true)
+[[ -n "$tab" ]] || tab="${HERDR_TAB_ID:-}"
+[[ -n "$tab" ]] || fail "no tab context; invoke this from inside Herdr"
+
+workspace=$(jq -r '.workspace_id // empty' <<<"$context" 2>/dev/null || true)
+[[ -n "$workspace" ]] || workspace="${HERDR_WORKSPACE_ID:-}"
+
+exec "$HERDR" plugin pane open \
+  --plugin "${HERDR_PLUGIN_ID:-herdr-quick-prompt}" \
+  --entrypoint picker \
+  --env "POST_TAB=$tab" \
+  --env "POST_WORKSPACE=$workspace" \
+  --focus
